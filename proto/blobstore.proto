@@ -1,0 +1,55 @@
+syntax = "proto3";
+
+package blobstore;
+
+import "google/protobuf/empty.proto";
+
+option go_package = "/goproto";
+
+enum BlobState{
+  INIT = 0;
+  PENDING = 1;
+  NORMAL = 2;
+  BROKEN = 3;
+  DELETING = 4;
+}
+message BlobInfo {
+  uint64 volume_id = 1;
+  uint32 seq = 2;
+  uint64 blob_size = 3;
+  BlobState state = 4;
+  int64 create_timestamp = 5; // also work as a version
+  int64 last_check_timestamp = 6;
+  map<string, string> meta = 7;
+}
+
+message CreateBlobReq {
+  uint64 volume_id = 1;
+  uint32 seq = 2;
+  uint64 blob_size = 3;
+  map<string, string>meta = 4;
+}
+
+message BlobKey{
+  uint64 volume_id = 1;
+  uint32 seq = 2;
+}
+
+message ListBlobReq{
+  optional BlobKey blob = 1;
+  optional BlobState StateFilter = 2;
+  int64 limit = 3;
+}
+
+message ListBlobResp{
+  repeated BlobInfo blob_infos = 1;
+  optional BlobKey next_continuation_token = 2;
+  bool truncated = 3;
+}
+
+service BlobService{
+  rpc CreateBlob(CreateBlobReq) returns (google.protobuf.Empty);
+  rpc StatBlob(BlobKey) returns (BlobInfo);
+  rpc DeleteBlob(BlobKey) returns (google.protobuf.Empty);
+  rpc ListBlob(ListBlobReq) returns (ListBlobResp);
+}
