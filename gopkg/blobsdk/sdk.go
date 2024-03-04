@@ -5,16 +5,19 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"github.com/open-bytestack/levelstore/gopkg/goproto"
-	"go.uber.org/zap"
-	"google.golang.org/grpc"
-	"google.golang.org/grpc/credentials/insecure"
 	"io"
 	"net/http"
+
+	"github.com/open-bytestack/levelstore/gopkg/goproto"
+	"go.uber.org/zap"
+	"google.golang.org/genproto/googleapis/bytestream"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials/insecure"
 )
 
 type Client struct {
 	goproto.BlobServiceClient
+	bytestream.ByteStreamClient
 	addr       string
 	httpClient *http.Client
 }
@@ -26,6 +29,7 @@ func NewClient(addr string) (Interface, error) {
 	}
 	return &Client{
 		BlobServiceClient: goproto.NewBlobServiceClient(conn),
+		ByteStreamClient:  bytestream.NewByteStreamClient(conn),
 		addr:              addr,
 		httpClient:        &http.Client{},
 	}, nil

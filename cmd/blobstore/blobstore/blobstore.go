@@ -2,7 +2,9 @@ package blobstore
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/binary"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -25,14 +27,14 @@ import (
 )
 
 type Server struct {
-	db *bbolt.DB
-	tc map[string]*taskController
+	db           *bbolt.DB
+	gcController *gcController
+	blockDir     string
 
-	blockDir string
+	_4KBytesPoolAlignedBlock sync.Pool
+	_4MBytesPool             sync.Pool
 
 	goproto.UnimplementedBlobServiceServer
-
-	bufferPool sync.Pool
 }
 
 func NewServer(baseDir string) *Server {
@@ -61,6 +63,10 @@ func NewServer(baseDir string) *Server {
 		if err != nil {
 			return err
 		}
+		_, err = tx.CreateBucketIfNotExists(bucketNameDeleteTombstone)
+		if err != nil {
+			return err
+		}
 		return nil
 	})
 	if err != nil {
@@ -69,26 +75,39 @@ func NewServer(baseDir string) *Server {
 
 	srv := &Server{
 		db:       db,
-		tc:       make(map[string]*taskController),
 		blockDir: filepath.Join(baseDir, "blocks"),
-		bufferPool: sync.Pool{New: func() interface{} {
+		_4KBytesPoolAlignedBlock: sync.Pool{New: func() interface{} {
 			return directio.AlignedBlock(4096)
+		}},
+		_4MBytesPool: sync.Pool{New: func() interface{} {
+			return make([]byte, 4*1024*1024)
 		}},
 	}
 
-	srv.registerBackgroundHandler()
-
-	go srv.backgroundLoop()
+	srv.gcController = &gcController{
+		gcInterval: 30 * time.Second,
+		db:         db,
+		blobDir:    srv.blockDir,
+	}
+	go srv.gcController.runGCLoop()
 	return srv
 }
 
 const (
-	keyLen = 8 + 4
+	keyLen          = 8 + 4
+	hashToDirPrefix = 2
 )
 
+func getBlobPath(in *goproto.BlobKey) string {
+	blobKey := formatBlobKey(in)
+	hashedBlobKeyRaw := sha256.Sum256(blobKey)
+	encodedHashString := hex.EncodeToString(hashedBlobKeyRaw[:])
+	return filepath.Join(encodedHashString[:hashToDirPrefix], encodedHashString+"_"+hex.EncodeToString(blobKey))
+}
+
 var (
-	bucketNameBlob       = []byte("blobs")
-	bucketNameDeleteTask = []byte("delete")
+	bucketNameBlob            = []byte("blobs")
+	bucketNameDeleteTombstone = []byte("delete")
 
 	errorBlobExists         = errors.New("blob exists")
 	errorBlobNotExists      = errors.New("blob not exists")
@@ -210,11 +229,11 @@ func (s *Server) DeleteBlob(_ context.Context, req *goproto.BlobKey) (*emptypb.E
 		).Info("delete blob")
 		out.State = goproto.BlobState_DELETING
 		bin, _ = proto.Marshal(out)
-		err = s.tc[getDeleteTaskController()].emitTask(tx, req)
 		if err != nil {
 			return err
 		}
-		return tx.Bucket(bucketNameBlob).Put(blobKey, bin)
+		return errors.Join(tx.Bucket(bucketNameDeleteTombstone).Put(blobKey, nil),
+			tx.Bucket(bucketNameBlob).Put(blobKey, bin))
 	})
 	if err != nil {
 		if errors.Is(err, errorBlobNotExists) {
@@ -281,7 +300,7 @@ func (s *Server) ListBlob(_ context.Context, req *goproto.ListBlobReq) (*goproto
 		}
 
 		if limit == 0 {
-			key, value = cur.Next()
+			key, _ = cur.Next()
 			if len(key) == 0 {
 				return nil
 			}
@@ -325,35 +344,38 @@ func (s *Server) atomicUpdateBlobState(in *goproto.BlobKey, state goproto.BlobSt
 	})
 }
 
-func (s *Server) ServeHTTP(rw http.ResponseWriter, r *http.Request) {
-	blockKey := strings.TrimPrefix(r.RequestURI, "/")
-	volumeIDAndSeq := strings.Split(blockKey, "/")
+func parseVolumeIDAndSeq(in string) (*goproto.BlobKey, error) {
+	volumeIDAndSeq := strings.Split(in, "/")
+	err := fmt.Errorf("invalid resource name %s", in)
 	if len(volumeIDAndSeq) != 2 {
-		rw.WriteHeader(http.StatusBadRequest)
-		rw.Write([]byte("invalid request url: " + r.RequestURI))
-		return
+		return nil, err
 	}
 	volumeID, err := strconv.ParseInt(volumeIDAndSeq[0], 10, 64)
 	if err != nil {
-		rw.WriteHeader(http.StatusBadRequest)
-		rw.Write([]byte("invalid request url: " + r.RequestURI))
-		return
+		return nil, err
 	}
 	seq, err := strconv.ParseInt(volumeIDAndSeq[1], 10, 64)
 	if err != nil {
-		rw.WriteHeader(http.StatusBadRequest)
-		rw.Write([]byte("invalid request url: " + r.RequestURI))
-		return
+		return nil, err
 	}
-	in := &goproto.BlobKey{
+	return &goproto.BlobKey{
 		VolumeId: uint64(volumeID),
 		Seq:      uint32(seq),
+	}, nil
+}
+func (s *Server) ServeHTTP(rw http.ResponseWriter, r *http.Request) {
+	blockKey := strings.TrimPrefix(r.RequestURI, "/")
+	blockKeyProto, err := parseVolumeIDAndSeq(blockKey)
+	if err != nil {
+		rw.WriteHeader(http.StatusBadRequest)
+		rw.Write([]byte(err.Error()))
+		return
 	}
 	switch r.Method {
 	case http.MethodGet:
-		s.readBlob(rw, r, in)
+		s.readBlob(rw, r, blockKeyProto)
 	case http.MethodPut:
-		s.writeBlob(rw, r, in)
+		s.writeBlob(rw, r, blockKeyProto)
 	}
 }
 
@@ -401,8 +423,8 @@ func (s *Server) readBlob(rw http.ResponseWriter, r *http.Request, in *goproto.B
 		return
 	}
 	defer f.Close()
-	buf := s.bufferPool.Get().([]byte)
-	defer s.bufferPool.Put(buf)
+	buf := s._4KBytesPoolAlignedBlock.Get().([]byte)
+	defer s._4KBytesPoolAlignedBlock.Put(buf)
 	n, err := io.CopyBuffer(rw, f, buf)
 	if err != nil {
 		rw.WriteHeader(http.StatusInternalServerError)
@@ -414,7 +436,6 @@ func (s *Server) readBlob(rw http.ResponseWriter, r *http.Request, in *goproto.B
 		err = errors.New("copied size mismatch the blob size")
 		return
 	}
-	return
 }
 
 func (s *Server) writeBlob(rw http.ResponseWriter, r *http.Request, in *goproto.BlobKey) {
@@ -509,8 +530,8 @@ func (s *Server) writeBlob(rw http.ResponseWriter, r *http.Request, in *goproto.
 		return
 	}
 
-	buf := s.bufferPool.Get().([]byte)
-	defer s.bufferPool.Put(buf)
+	buf := s._4KBytesPoolAlignedBlock.Get().([]byte)
+	defer s._4KBytesPoolAlignedBlock.Put(buf)
 	written, err := io.CopyBuffer(df, r.Body, buf)
 	if err != nil {
 		writeErr = fmt.Errorf("copy body to file error: %s", err)

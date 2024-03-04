@@ -14,6 +14,7 @@ import (
 	"go.uber.org/zap"
 	"golang.org/x/net/http2"
 	"golang.org/x/net/http2/h2c"
+	"google.golang.org/genproto/googleapis/bytestream"
 	"google.golang.org/grpc"
 )
 
@@ -54,6 +55,7 @@ func MainCommand() *cobra.Command {
 		srv := NewServer(*flagBaseDir)
 		grpcServer := grpc.NewServer()
 		goproto.RegisterBlobServiceServer(grpcServer, srv)
+		bytestream.RegisterByteStreamServer(grpcServer, srv)
 
 		httpSrv := http.Server{Handler: h2c.NewHandler(grpcHandlerFunc(grpcServer, srv), &http2.Server{}), Addr: *flagPort}
 

@@ -161,9 +161,9 @@ func newListBlobCommand() *cobra.Command {
 		for i := range list.BlobInfos {
 			info := []string{
 				fmt.Sprintf("%d/%d", list.BlobInfos[i].VolumeId, list.BlobInfos[i].Seq),
-				fmt.Sprintf("%s", list.BlobInfos[i].State.String()),
+				list.BlobInfos[i].State.String(),
 				fmt.Sprintf("%d", list.BlobInfos[i].BlobSize),
-				fmt.Sprintf("%s", time.Unix(list.BlobInfos[i].CreateTimestamp, 0).String()),
+				time.Unix(list.BlobInfos[i].CreateTimestamp, 0).String(),
 			}
 			table.Append(info)
 
