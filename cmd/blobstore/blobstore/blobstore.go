@@ -31,8 +31,12 @@ type Server struct {
 	gcController *gcController
 	blockDir     string
 
-	_4KBytesPoolAlignedBlock sync.Pool
-	_2MBytesPool             sync.Pool
+	dio          bool
+	_4KBytesPool sync.Pool
+
+	_2MBytesPool sync.Pool
+
+	writeFileOpener func(name string, flag int, perm os.FileMode) (file *os.File, err error)
 
 	goproto.UnimplementedBlobServiceServer
 }
@@ -76,14 +80,23 @@ func NewServer(baseDir string) *Server {
 	srv := &Server{
 		db:       db,
 		blockDir: filepath.Join(baseDir, "blocks"),
-		_4KBytesPoolAlignedBlock: sync.Pool{New: func() interface{} {
-			ptr := directio.AlignedBlock(4096)
-			return &ptr
-		}},
 		_2MBytesPool: sync.Pool{New: func() interface{} {
 			ptr := make([]byte, 2*1024*1024)
 			return &ptr
 		}},
+	}
+	if srv.dio {
+		srv._4KBytesPool = sync.Pool{New: func() interface{} {
+			ptr := directio.AlignedBlock(4096)
+			return &ptr
+		}}
+		srv.writeFileOpener = directio.OpenFile
+	} else {
+		srv._4KBytesPool = sync.Pool{New: func() interface{} {
+			ptr := make([]byte, 4096)
+			return &ptr
+		}}
+		srv.writeFileOpener = os.OpenFile
 	}
 
 	srv.gcController = &gcController{
@@ -286,6 +299,9 @@ func (s *Server) ListBlob(_ context.Context, req *goproto.ListBlobReq) (*goproto
 		} else {
 			key, value = cur.First()
 		}
+		if len(key) == 0 {
+			return nil
+		}
 		err := handleOne(key, value)
 		if err != nil {
 			return err
@@ -425,8 +441,8 @@ func (s *Server) readBlob(rw http.ResponseWriter, r *http.Request, in *goproto.B
 		return
 	}
 	defer f.Close()
-	buf := s._4KBytesPoolAlignedBlock.Get().(*[]byte)
-	defer s._4KBytesPoolAlignedBlock.Put(buf)
+	buf := s._4KBytesPool.Get().(*[]byte)
+	defer s._4KBytesPool.Put(buf)
 	n, err := io.CopyBuffer(rw, f, *buf)
 	if err != nil {
 		rw.WriteHeader(http.StatusInternalServerError)
@@ -526,14 +542,14 @@ func (s *Server) writeBlob(rw http.ResponseWriter, r *http.Request, in *goproto.
 	}
 
 	// opened file can not be deferred close may cause leak
-	df, err := directio.OpenFile(blobPath, os.O_CREATE|os.O_WRONLY, 0o600)
+	df, err := s.writeFileOpener(blobPath, os.O_CREATE|os.O_WRONLY, 0o600)
 	if err != nil {
 		writeErr = fmt.Errorf("open file %s error: %s", blobPath, err)
 		return
 	}
 
-	buf := s._4KBytesPoolAlignedBlock.Get().(*[]byte)
-	defer s._4KBytesPoolAlignedBlock.Put(buf)
+	buf := s._4KBytesPool.Get().(*[]byte)
+	defer s._4KBytesPool.Put(buf)
 	written, err := io.CopyBuffer(df, r.Body, *buf)
 	if err != nil {
 		writeErr = fmt.Errorf("copy body to file error: %s", err)

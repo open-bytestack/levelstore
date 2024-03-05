@@ -9,7 +9,6 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/ncw/directio"
 	"github.com/open-bytestack/levelstore/gopkg/goproto"
 	"go.etcd.io/bbolt"
 	"go.uber.org/zap"
@@ -75,27 +74,33 @@ func (s *Server) Write(server bytestream.ByteStream_WriteServer) (err error) {
 	if err != nil {
 		return err
 	}
-	blockKeyProto, err := parseVolumeIDAndSeq(wr.ResourceName)
+	blobKeyProto, err := parseVolumeIDAndSeq(wr.ResourceName)
 	if err != nil {
+		_ = server.SendAndClose(&bytestream.WriteResponse{CommittedSize: 0})
 		return status.Errorf(codes.InvalidArgument, "parse volume id and seq error: %s", err)
 	}
-	blobInfo, err := s.StatBlob(server.Context(), blockKeyProto)
+	blobInfo, err := s.StatBlob(server.Context(), blobKeyProto)
 	if err != nil {
 		return err
 	}
-	formattedBlobKey := formatBlobKey(blockKeyProto)
-
+	formattedBlobKey := formatBlobKey(blobKeyProto)
 	if blobInfo.State != goproto.BlobState_INIT {
-		return status.Error(codes.InvalidArgument, "write unwritable blob in state: %s"+blobInfo.State.String())
+		_ = server.SendAndClose(&bytestream.WriteResponse{CommittedSize: 0})
+		return status.Errorf(codes.InvalidArgument, "write unwritable blob in state: %s", blobInfo.State.String())
 	}
-	err = s.atomicUpdateBlobState(blockKeyProto, goproto.BlobState_PENDING)
+	err = s.atomicUpdateBlobState(blobKeyProto, goproto.BlobState_PENDING)
 	if err != nil {
+		_ = server.SendAndClose(&bytestream.WriteResponse{CommittedSize: 0})
 		return status.Errorf(codes.Internal, "write blob atomicUpdateBlobState error: %s", err)
 	}
 
 	var writeErr error = nil
+	var committedSize int64
 
 	defer func() {
+		_ = server.SendAndClose(&bytestream.WriteResponse{
+			CommittedSize: committedSize,
+		})
 		if writeErr != nil {
 			blobInfo.State = goproto.BlobState_BROKEN
 			if blobInfo.Meta == nil {
@@ -109,8 +114,8 @@ func (s *Server) Write(server bytestream.ByteStream_WriteServer) (err error) {
 			if uerr != nil {
 				zap.L().With(
 					zap.Error(err),
-					zap.Uint64("volume_id", blockKeyProto.VolumeId),
-					zap.Uint32("seq", blockKeyProto.Seq),
+					zap.Uint64("volume_id", blobKeyProto.VolumeId),
+					zap.Uint32("seq", blobKeyProto.Seq),
 					zap.String("blob_info", blobInfo.String()),
 				).Error("update blob info error")
 				err = status.Errorf(codes.Internal, "update meta db during write blob error: %s", err)
@@ -132,8 +137,8 @@ func (s *Server) Write(server bytestream.ByteStream_WriteServer) (err error) {
 			if uerr != nil {
 				zap.L().With(
 					zap.Error(err),
-					zap.Uint64("volume_id", blockKeyProto.VolumeId),
-					zap.Uint32("seq", blockKeyProto.Seq),
+					zap.Uint64("volume_id", blobKeyProto.VolumeId),
+					zap.Uint32("seq", blobKeyProto.Seq),
 					zap.String("blob_info", blobInfo.String()),
 				).Error("update blob info error")
 				err = status.Errorf(codes.Internal, "update meta db during write blob error: %s", err)
@@ -144,7 +149,7 @@ func (s *Server) Write(server bytestream.ByteStream_WriteServer) (err error) {
 		}
 	}()
 
-	blobPath := filepath.Join(s.blockDir, getBlobPath(blockKeyProto))
+	blobPath := filepath.Join(s.blockDir, getBlobPath(blobKeyProto))
 	blobDir := filepath.Dir(blobPath)
 	err = os.MkdirAll(blobDir, 0o755)
 	if err != nil {
@@ -153,24 +158,23 @@ func (s *Server) Write(server bytestream.ByteStream_WriteServer) (err error) {
 	}
 
 	// opened file can not be deferred close may cause leak
-	df, err := directio.OpenFile(blobPath, os.O_CREATE|os.O_WRONLY, 0o600)
+	df, err := s.writeFileOpener(blobPath, os.O_CREATE|os.O_WRONLY, 0o600)
 	if err != nil {
 		writeErr = fmt.Errorf("open file %s error: %s", blobPath, err)
 		return
 	}
 
 	var finishWrite bool
-	buf := s._4KBytesPoolAlignedBlock.Get().(*[]byte)
-	defer s._4KBytesPoolAlignedBlock.Put(buf)
+	buf := s._4KBytesPool.Get().(*[]byte)
+	defer s._4KBytesPool.Put(buf)
 
-	var committedSize int64
 	writeOnceFn := func(InputData []byte) error {
 		written, err := io.CopyBuffer(df, bytes.NewReader(InputData), *buf)
 		if err != nil {
 			return fmt.Errorf("copy body to file error: %s", err)
 		}
 		if written != int64(len(wr.Data)) {
-			return fmt.Errorf("copy body size mismatched with content-length, should be %d but %d written", len(wr.Data), written)
+			return fmt.Errorf("body size copied mismatched with content-length, should be %d but %d written", len(wr.Data), written)
 		}
 		committedSize += written
 		return nil
@@ -183,6 +187,14 @@ func (s *Server) Write(server bytestream.ByteStream_WriteServer) (err error) {
 	finishWrite = wr.FinishWrite
 	for !finishWrite {
 		wr, writeErr = server.Recv()
+		if errors.Is(writeErr, io.EOF) {
+			if committedSize != int64(blobInfo.BlobSize) {
+				writeErr = fmt.Errorf("unexpectEOF: size copied mismatched with blobsize, should be %d but be %d", blobInfo.BlobSize, committedSize)
+			} else {
+				writeErr = nil
+			}
+			break
+		}
 		if writeErr != nil {
 			return
 		}
@@ -196,9 +208,7 @@ func (s *Server) Write(server bytestream.ByteStream_WriteServer) (err error) {
 		finishWrite = wr.FinishWrite
 	}
 
-	return server.SendAndClose(&bytestream.WriteResponse{
-		CommittedSize: committedSize,
-	})
+	return nil
 }
 
 func (s *Server) QueryWriteStatus(ctx context.Context, request *bytestream.QueryWriteStatusRequest) (*bytestream.QueryWriteStatusResponse, error) {
