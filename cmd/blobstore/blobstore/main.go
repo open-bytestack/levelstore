@@ -37,10 +37,15 @@ func MainCommand() *cobra.Command {
 	}
 	flagPort := cmd.Flags().String("port", ":8080", "port for service")
 	flagBaseDir := cmd.Flags().String("basedir", "", "basedir")
+	flagLogLevel := cmd.Flags().String("log-level", zap.InfoLevel.String(), "log level")
 
 	cmd.RunE = func(cmd *cobra.Command, args []string) error {
 		cfg := zap.NewProductionConfig()
-		cfg.Level.SetLevel(zap.InfoLevel)
+		al, err := zap.ParseAtomicLevel(*flagLogLevel)
+		if err != nil {
+			panic(err)
+		}
+		cfg.Level.SetLevel(al.Level())
 		cfg.DisableStacktrace = true
 		lgr, err := cfg.Build()
 		if err != nil {

@@ -3,6 +3,7 @@ package blobsdk_test
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"testing"
@@ -80,7 +81,6 @@ func TestBlobSDKGRPC(t *testing.T) {
 	time.Sleep(5 * time.Second)
 	cli, err := blobsdk.NewClient("localhost:8080")
 	assert.Nil(t, err)
-	t.Log("create blob")
 	_, err = cli.CreateBlob(ctx, &goproto.CreateBlobReq{
 		VolumeId: 10000,
 		Seq:      0,
@@ -88,13 +88,10 @@ func TestBlobSDKGRPC(t *testing.T) {
 	})
 	assert.Nil(t, err)
 
-	t.Log("create blob writer")
-
 	bkey := &goproto.BlobKey{
 		VolumeId: 10000,
 		Seq:      0,
 	}
-	t.Log("write data")
 	data := bytes.Repeat([]byte("a"), 8192)
 	wc, err := cli.Write(ctx)
 	assert.Nil(t, err)
@@ -118,10 +115,60 @@ func TestBlobSDKGRPC(t *testing.T) {
 	})
 	assert.Nil(t, err)
 	rr, err := rc.Recv()
-	assert.Nilf(t, err, "%s", err)
+	assert.Nil(t, err)
 	assert.Equal(t, len(rr.Data), len(data))
 	err = rc.CloseSend()
 	assert.Nil(t, err)
+
+	_, err = cli.CreateBlob(ctx, &goproto.CreateBlobReq{
+		VolumeId: 10001,
+		Seq:      0,
+		BlobSize: 12*1024*1024 + 256, // 12M + 256K
+	})
+
+	wc, err = cli.Write(ctx)
+	assert.Nil(t, err)
+	offset := int64(0)
+	data = bytes.Repeat([]byte("abcd"), 256*1024)
+	for i := 0; i < 12; i++ {
+		err = wc.Send(&bytestream.WriteRequest{
+			ResourceName: fmt.Sprintf("%d/%d", 10001, 0),
+			WriteOffset:  offset,
+			FinishWrite:  false,
+			Data:         data,
+		})
+		assert.Nil(t, err)
+		offset += int64(len(data))
+	}
+
+	err = wc.Send(&bytestream.WriteRequest{
+		ResourceName: fmt.Sprintf("%d/%d", 10001, 0),
+		WriteOffset:  offset,
+		FinishWrite:  true,
+		Data:         bytes.Repeat([]byte("abcd"), 64),
+	})
+	assert.Nil(t, err)
+
+	resp, err = wc.CloseAndRecv()
+	assert.Nil(t, err)
+	assert.Equal(t, int64(12*1024*1024+256), resp.CommittedSize)
+
+	rc, err = cli.Read(ctx, &bytestream.ReadRequest{
+		ResourceName: fmt.Sprintf("%d/%d", 10001, 0),
+	})
+
+	assert.Nil(t, err)
+	for {
+		rr, err = rc.Recv()
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		assert.Nil(t, err)
+		for i := 0; i < len(rr.Data); i += 4 {
+			assert.Equal(t, []byte("abcd"), rr.Data[i:i+4])
+		}
+	}
+	assert.Nil(t, rc.CloseSend())
 	cancel()
 	<-finished
 }

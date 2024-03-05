@@ -44,8 +44,8 @@ func (s *Server) Read(request *bytestream.ReadRequest, server bytestream.ByteStr
 			return status.Errorf(codes.Internal, "seek file error: %s", err)
 		}
 	}
-	buf := s._4MBytesPool.Get().(*[]byte)
-	defer s._4MBytesPool.Put(buf)
+	buf := s._2MBytesPool.Get().(*[]byte)
+	defer s._2MBytesPool.Put(buf)
 	var lr io.Reader = f
 	if request.ReadLimit != 0 {
 		lr = io.LimitReader(f, request.ReadLimit)
@@ -185,6 +185,9 @@ func (s *Server) Write(server bytestream.ByteStream_WriteServer) (err error) {
 		wr, writeErr = server.Recv()
 		if writeErr != nil {
 			return
+		}
+		if wr.WriteOffset != committedSize {
+			return status.Errorf(codes.InvalidArgument, "write offset should be %d but be %d", committedSize, wr.WriteOffset)
 		}
 		writeErr = writeOnceFn(wr.Data)
 		if writeErr != nil {

@@ -32,7 +32,7 @@ type Server struct {
 	blockDir     string
 
 	_4KBytesPoolAlignedBlock sync.Pool
-	_4MBytesPool             sync.Pool
+	_2MBytesPool             sync.Pool
 
 	goproto.UnimplementedBlobServiceServer
 }
@@ -80,8 +80,8 @@ func NewServer(baseDir string) *Server {
 			ptr := directio.AlignedBlock(4096)
 			return &ptr
 		}},
-		_4MBytesPool: sync.Pool{New: func() interface{} {
-			ptr := make([]byte, 4*1024*1024)
+		_2MBytesPool: sync.Pool{New: func() interface{} {
+			ptr := make([]byte, 2*1024*1024)
 			return &ptr
 		}},
 	}
