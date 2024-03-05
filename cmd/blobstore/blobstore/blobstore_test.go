@@ -14,13 +14,17 @@ import (
 func TestBlobStoreServer(t *testing.T) {
 	tempDir := t.TempDir()
 	tempFile := filepath.Join(tempDir, "test.db")
-	
-	srv := blobstore.NewServer(tempFile)
+
+	srv := blobstore.NewServer(&blobstore.Config{
+		BaseDir:      tempFile,
+		BlobChecksum: false,
+		WriteDio:     false,
+	})
 	t.Run("test create blob", func(t *testing.T) {
 		createReq := &goproto.CreateBlobReq{
 			VolumeId: 1,
 			Seq:      0,
-			BlobSize: 1024,
+			BlobSize: blobstore.SignBlobSize,
 		}
 		_, err := srv.CreateBlob(context.TODO(), createReq)
 		assert.Nil(t, err)
@@ -67,7 +71,7 @@ func TestBlobStoreServer(t *testing.T) {
 		createReq := &goproto.CreateBlobReq{
 			VolumeId: 1,
 			Seq:      0,
-			BlobSize: 1024,
+			BlobSize: blobstore.SignBlobSize,
 		}
 		_, err := srv.CreateBlob(context.TODO(), createReq)
 		code, ok := status.FromError(err)
@@ -80,7 +84,7 @@ func TestBlobStoreServer(t *testing.T) {
 			createReq := &goproto.CreateBlobReq{
 				VolumeId: uint64(i),
 				Seq:      0,
-				BlobSize: 1024,
+				BlobSize: blobstore.SignBlobSize,
 			}
 			_, err := srv.CreateBlob(context.TODO(), createReq)
 			assert.Nil(t, err)
@@ -141,7 +145,11 @@ func BenchmarkBlobServer(b *testing.B) {
 	tempDir := b.TempDir()
 	tempFile := filepath.Join(tempDir, "test.db")
 
-	srv := blobstore.NewServer(tempFile)
+	srv := blobstore.NewServer(&blobstore.Config{
+		BaseDir:      tempFile,
+		BlobChecksum: true,
+		WriteDio:     true,
+	})
 
 	for i := 0; i < 1000; i++ {
 		_, err := srv.CreateBlob(context.TODO(), &goproto.CreateBlobReq{

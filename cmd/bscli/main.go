@@ -44,6 +44,7 @@ func main() {
 		newStatBlobCommand(),
 		newListBlobCommand(),
 		newDeleteBlobCommand(),
+		newCheckBlobCommand(),
 		newWriteBlobCommand(),
 	)
 	err := cmd.Execute()
@@ -194,7 +195,7 @@ func newListBlobCommand() *cobra.Command {
 func newDeleteBlobCommand() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "delete",
-		Short: "delete blobs",
+		Short: "delete blob",
 	}
 
 	vid := cmd.Flags().Uint64("volume_id", 0, "volume id")
@@ -218,6 +219,41 @@ func newDeleteBlobCommand() *cobra.Command {
 			VolumeId: *vid,
 			Seq:      *seq,
 		})
+		return err
+	}
+	return cmd
+}
+
+func newCheckBlobCommand() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "check",
+		Short: "check blob",
+	}
+
+	vid := cmd.Flags().Uint64("volume_id", 0, "volume id")
+	err := cmd.MarkFlagRequired("volume_id")
+	if err != nil {
+		panic(err)
+	}
+
+	seq := cmd.Flags().Uint32("seq", 0, "seq id")
+	err = cmd.MarkFlagRequired("seq")
+	if err != nil {
+		panic(err)
+	}
+
+	cmd.RunE = func(cmd *cobra.Command, args []string) error {
+		addr, err := cmd.Flags().GetString("addr")
+		if err != nil {
+			return err
+		}
+		resp, err := newClient(addr).CheckBlob(context.TODO(), &goproto.BlobKey{
+			VolumeId: *vid,
+			Seq:      *seq,
+		})
+		if resp != nil {
+			fmt.Printf("result(checksum_ok): %t, fail_reason: %s\n", resp.ChecksumOk, resp.Reason)
+		}
 		return err
 	}
 	return cmd

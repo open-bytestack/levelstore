@@ -27,6 +27,7 @@ type BlobServiceClient interface {
 	StatBlob(ctx context.Context, in *BlobKey, opts ...grpc.CallOption) (*BlobInfo, error)
 	DeleteBlob(ctx context.Context, in *BlobKey, opts ...grpc.CallOption) (*emptypb.Empty, error)
 	ListBlob(ctx context.Context, in *ListBlobReq, opts ...grpc.CallOption) (*ListBlobResp, error)
+	CheckBlob(ctx context.Context, in *BlobKey, opts ...grpc.CallOption) (*CheckBlobResp, error)
 }
 
 type blobServiceClient struct {
@@ -73,6 +74,15 @@ func (c *blobServiceClient) ListBlob(ctx context.Context, in *ListBlobReq, opts 
 	return out, nil
 }
 
+func (c *blobServiceClient) CheckBlob(ctx context.Context, in *BlobKey, opts ...grpc.CallOption) (*CheckBlobResp, error) {
+	out := new(CheckBlobResp)
+	err := c.cc.Invoke(ctx, "/blobstore.BlobService/CheckBlob", in, out, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // BlobServiceServer is the server API for BlobService service.
 // All implementations must embed UnimplementedBlobServiceServer
 // for forward compatibility
@@ -81,6 +91,7 @@ type BlobServiceServer interface {
 	StatBlob(context.Context, *BlobKey) (*BlobInfo, error)
 	DeleteBlob(context.Context, *BlobKey) (*emptypb.Empty, error)
 	ListBlob(context.Context, *ListBlobReq) (*ListBlobResp, error)
+	CheckBlob(context.Context, *BlobKey) (*CheckBlobResp, error)
 	mustEmbedUnimplementedBlobServiceServer()
 }
 
@@ -99,6 +110,9 @@ func (UnimplementedBlobServiceServer) DeleteBlob(context.Context, *BlobKey) (*em
 }
 func (UnimplementedBlobServiceServer) ListBlob(context.Context, *ListBlobReq) (*ListBlobResp, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method ListBlob not implemented")
+}
+func (UnimplementedBlobServiceServer) CheckBlob(context.Context, *BlobKey) (*CheckBlobResp, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method CheckBlob not implemented")
 }
 func (UnimplementedBlobServiceServer) mustEmbedUnimplementedBlobServiceServer() {}
 
@@ -185,6 +199,24 @@ func _BlobService_ListBlob_Handler(srv interface{}, ctx context.Context, dec fun
 	return interceptor(ctx, in, info, handler)
 }
 
+func _BlobService_CheckBlob_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(BlobKey)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(BlobServiceServer).CheckBlob(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: "/blobstore.BlobService/CheckBlob",
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(BlobServiceServer).CheckBlob(ctx, req.(*BlobKey))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // BlobService_ServiceDesc is the grpc.ServiceDesc for BlobService service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -207,6 +239,10 @@ var BlobService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "ListBlob",
 			Handler:    _BlobService_ListBlob_Handler,
+		},
+		{
+			MethodName: "CheckBlob",
+			Handler:    _BlobService_CheckBlob_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},

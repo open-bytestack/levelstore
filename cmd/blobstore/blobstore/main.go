@@ -60,7 +60,11 @@ func MainCommand() *cobra.Command {
 			zap.L().Fatal("basedir can not be empty")
 		}
 
-		srv := NewServer(*flagBaseDir)
+		srv := NewServer(&Config{
+			BaseDir:      *flagBaseDir,
+			WriteDio:     true,
+			BlobChecksum: true,
+		})
 		grpcServer := grpc.NewServer()
 		goproto.RegisterBlobServiceServer(grpcServer, srv)
 		bytestream.RegisterByteStreamServer(grpcServer, srv)

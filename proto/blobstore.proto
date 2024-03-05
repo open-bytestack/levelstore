@@ -47,9 +47,15 @@ message ListBlobResp{
   bool truncated = 3;
 }
 
+message CheckBlobResp{
+  bool checksum_ok = 1;
+  string reason = 2;
+}
+
 service BlobService{
   rpc CreateBlob(CreateBlobReq) returns (google.protobuf.Empty);
   rpc StatBlob(BlobKey) returns (BlobInfo);
   rpc DeleteBlob(BlobKey) returns (google.protobuf.Empty);
   rpc ListBlob(ListBlobReq) returns (ListBlobResp);
+  rpc CheckBlob(BlobKey) returns (CheckBlobResp);
 }

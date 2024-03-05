@@ -19,35 +19,33 @@ import (
 )
 
 func (s *Server) Read(request *bytestream.ReadRequest, server bytestream.ByteStream_ReadServer) error {
-	blockKeyProto, err := parseVolumeIDAndSeq(request.ResourceName)
+	blobKeyProto, err := parseVolumeIDAndSeq(request.ResourceName)
 	if err != nil {
 		return status.Errorf(codes.InvalidArgument, "parse volume id and seq error: %s", err)
 	}
-	blobInfo, err := s.StatBlob(server.Context(), blockKeyProto)
+	blobInfo, err := s.StatBlob(server.Context(), blobKeyProto)
 	if err != nil {
 		return err
 	}
 	if blobInfo.State != goproto.BlobState_NORMAL {
 		return status.Errorf(codes.InvalidArgument, "read unreadable blob in state: %s", blobInfo.State.String())
 	}
-
-	path := filepath.Join(s.blockDir, getBlobPath(blockKeyProto))
-	f, err := os.Open(path)
+	br, err := s.openBlobReader(blobKeyProto)
 	if err != nil {
 		return status.Errorf(codes.InvalidArgument, "parse volume id and seq error: %s", err)
 	}
-	defer f.Close()
+	defer br.Close()
 	if request.ReadOffset != 0 {
-		_, err = f.Seek(request.ReadOffset, io.SeekStart)
+		_, err = br.Seek(request.ReadOffset, io.SeekStart)
 		if err != nil {
 			return status.Errorf(codes.Internal, "seek file error: %s", err)
 		}
 	}
 	buf := s._2MBytesPool.Get().(*[]byte)
 	defer s._2MBytesPool.Put(buf)
-	var lr io.Reader = f
+	var lr io.Reader = br
 	if request.ReadLimit != 0 {
-		lr = io.LimitReader(f, request.ReadLimit)
+		lr = io.LimitReader(br, request.ReadLimit)
 	}
 	for {
 		n, err := lr.Read(*buf)
@@ -149,7 +147,7 @@ func (s *Server) Write(server bytestream.ByteStream_WriteServer) (err error) {
 		}
 	}()
 
-	blobPath := filepath.Join(s.blockDir, getBlobPath(blobKeyProto))
+	blobPath := filepath.Join(s.blobDir, getBlobPath(blobKeyProto))
 	blobDir := filepath.Dir(blobPath)
 	err = os.MkdirAll(blobDir, 0o755)
 	if err != nil {
@@ -165,13 +163,32 @@ func (s *Server) Write(server bytestream.ByteStream_WriteServer) (err error) {
 	}
 
 	var finishWrite bool
-	buf := s._4KBytesPool.Get().(*[]byte)
-	defer s._4KBytesPool.Put(buf)
+	buf := s._2MBytesPool.Get().(*[]byte)
+	defer s._2MBytesPool.Put(buf)
+
+	var writer io.Writer
+	var signer *DataSigner
+	if s.blobChecksum {
+		signer = NewDataSigner(SignBlobSize, blobInfo.BlobSize)
+		writer = io.MultiWriter(df, signer)
+	} else {
+		writer = df
+	}
 
 	writeOnceFn := func(InputData []byte) error {
-		written, err := io.CopyBuffer(df, bytes.NewReader(InputData), *buf)
-		if err != nil {
-			return fmt.Errorf("copy body to file error: %s", err)
+		var written int64
+		var err error
+		if s.writeDio {
+			written, err = io.CopyBuffer(writer, bytes.NewReader(InputData), *buf)
+			if err != nil {
+				return fmt.Errorf("copy body to file error: %s", err)
+			}
+		} else {
+			w, err := writer.Write(InputData)
+			written = int64(w)
+			if err != nil {
+				return fmt.Errorf("copy body to file error: %s", err)
+			}
 		}
 		if written != int64(len(wr.Data)) {
 			return fmt.Errorf("body size copied mismatched with content-length, should be %d but %d written", len(wr.Data), written)
@@ -208,6 +225,13 @@ func (s *Server) Write(server bytestream.ByteStream_WriteServer) (err error) {
 		finishWrite = wr.FinishWrite
 	}
 
+	if s.blobChecksum {
+		err = os.WriteFile(blobPath+signSuffix(), SignMarshall(signer.Sum()), 0o600)
+		if err != nil {
+			writeErr = fmt.Errorf("write file sign error: %w", err)
+			return
+		}
+	}
 	return nil
 }
 

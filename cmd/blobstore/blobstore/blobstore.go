@@ -26,26 +26,33 @@ import (
 	"google.golang.org/protobuf/types/known/emptypb"
 )
 
+type Config struct {
+	BaseDir      string
+	WriteDio     bool
+	BlobChecksum bool
+}
+
 type Server struct {
-	db           *bbolt.DB
+	db      *bbolt.DB
+	blobDir string
+
 	gcController *gcController
-	blockDir     string
 
-	dio          bool
-	_4KBytesPool sync.Pool
-
-	_2MBytesPool sync.Pool
-
+	_2MBytesPool    sync.Pool
+	writeDio        bool
 	writeFileOpener func(name string, flag int, perm os.FileMode) (file *os.File, err error)
+
+	blobChecksum bool
+	signManager  *blobSignManager
 
 	goproto.UnimplementedBlobServiceServer
 }
 
-func NewServer(baseDir string) *Server {
-	fi, err := os.Stat(baseDir)
+func NewServer(cfg *Config) *Server {
+	fi, err := os.Stat(cfg.BaseDir)
 	if err != nil {
 		if os.IsNotExist(err) {
-			err = os.MkdirAll(baseDir, 0o755)
+			err = os.MkdirAll(cfg.BaseDir, 0o755)
 			if err != nil {
 				panic(err)
 			}
@@ -54,10 +61,10 @@ func NewServer(baseDir string) *Server {
 		}
 	} else {
 		if !fi.IsDir() {
-			panic(baseDir + " is not dir")
+			panic(cfg.BaseDir + " is not dir")
 		}
 	}
-	metaDBPath := filepath.Join(baseDir, "meta.db")
+	metaDBPath := filepath.Join(cfg.BaseDir, "meta.db")
 	db, err := bbolt.Open(metaDBPath, 0o600, nil)
 	if err != nil {
 		panic(err)
@@ -78,31 +85,34 @@ func NewServer(baseDir string) *Server {
 	}
 
 	srv := &Server{
-		db:       db,
-		blockDir: filepath.Join(baseDir, "blocks"),
-		_2MBytesPool: sync.Pool{New: func() interface{} {
-			ptr := make([]byte, 2*1024*1024)
-			return &ptr
-		}},
+		db:           db,
+		blobDir:      filepath.Join(cfg.BaseDir, "blobs"),
+		writeDio:     cfg.WriteDio,
+		blobChecksum: cfg.BlobChecksum,
 	}
-	if srv.dio {
-		srv._4KBytesPool = sync.Pool{New: func() interface{} {
-			ptr := directio.AlignedBlock(4096)
+
+	if srv.writeDio {
+		srv._2MBytesPool = sync.Pool{New: func() interface{} {
+			ptr := directio.AlignedBlock(2 * 1024 * 1024)
 			return &ptr
 		}}
 		srv.writeFileOpener = directio.OpenFile
 	} else {
-		srv._4KBytesPool = sync.Pool{New: func() interface{} {
-			ptr := make([]byte, 4096)
+		srv._2MBytesPool = sync.Pool{New: func() interface{} {
+			ptr := make([]byte, 2*1024*1024)
 			return &ptr
 		}}
 		srv.writeFileOpener = os.OpenFile
 	}
 
+	if srv.blobChecksum {
+		srv.signManager = NewBlobSignManager()
+	}
+
 	srv.gcController = &gcController{
 		gcInterval: 30 * time.Second,
 		db:         db,
-		blobDir:    srv.blockDir,
+		blobDir:    srv.blobDir,
 	}
 	go srv.gcController.runGCLoop()
 	return srv
@@ -111,6 +121,7 @@ func NewServer(baseDir string) *Server {
 const (
 	keyLen          = 8 + 4
 	hashToDirPrefix = 2
+	SignBlobSize    = 65536 // 64K
 )
 
 func getBlobPath(in *goproto.BlobKey) string {
@@ -118,6 +129,10 @@ func getBlobPath(in *goproto.BlobKey) string {
 	hashedBlobKeyRaw := sha256.Sum256(blobKey)
 	encodedHashString := hex.EncodeToString(hashedBlobKeyRaw[:])
 	return filepath.Join(encodedHashString[:hashToDirPrefix], encodedHashString+"_"+hex.EncodeToString(blobKey))
+}
+
+func signSuffix() string {
+	return ".sign"
 }
 
 var (
@@ -156,6 +171,9 @@ func parseBlobKey(in []byte) *goproto.BlobKey {
 }
 
 func (s *Server) CreateBlob(_ context.Context, req *goproto.CreateBlobReq) (*emptypb.Empty, error) {
+	if req.BlobSize%SignBlobSize != 0 {
+		return nil, status.Errorf(codes.InvalidArgument, "invalid blobsize %d, must align to 4096", req.BlobSize)
+	}
 	zap.L().With(zap.String("req", req.String())).Info("create blob success")
 	var err error
 	defer func() {
@@ -337,6 +355,31 @@ func (s *Server) ListBlob(_ context.Context, req *goproto.ListBlobReq) (*goproto
 	return out, nil
 }
 
+func (s *Server) CheckBlob(ctx context.Context, req *goproto.BlobKey) (*goproto.CheckBlobResp, error) {
+	if !s.blobChecksum {
+		return nil, status.Errorf(codes.FailedPrecondition, "blob checksum not opened")
+	}
+	_, err := s.StatBlob(ctx, req)
+	if err != nil {
+		return nil, err
+	}
+	f, err := s.openBlobReader(req)
+	if err != nil {
+		return nil, status.Errorf(codes.Internal, "open blob error: %s", err)
+	}
+	defer f.Close()
+	resp := &goproto.CheckBlobResp{
+		ChecksumOk: true,
+	}
+	_, err = io.Copy(io.Discard, f)
+
+	if err != nil {
+		resp.ChecksumOk = false
+		resp.Reason = err.Error()
+	}
+	return resp, nil
+}
+
 func (s *Server) atomicUpdateBlobState(in *goproto.BlobKey, state goproto.BlobState) error {
 	blobKey := formatBlobKey(in)
 	return s.db.Update(func(tx *bbolt.Tx) error {
@@ -382,8 +425,8 @@ func parseVolumeIDAndSeq(in string) (*goproto.BlobKey, error) {
 	}, nil
 }
 func (s *Server) ServeHTTP(rw http.ResponseWriter, r *http.Request) {
-	blockKey := strings.TrimPrefix(r.RequestURI, "/")
-	blockKeyProto, err := parseVolumeIDAndSeq(blockKey)
+	blobKey := strings.TrimPrefix(r.RequestURI, "/")
+	blobKeyProto, err := parseVolumeIDAndSeq(blobKey)
 	if err != nil {
 		rw.WriteHeader(http.StatusBadRequest)
 		_, _ = rw.Write([]byte(err.Error()))
@@ -391,9 +434,9 @@ func (s *Server) ServeHTTP(rw http.ResponseWriter, r *http.Request) {
 	}
 	switch r.Method {
 	case http.MethodGet:
-		s.readBlob(rw, r, blockKeyProto)
+		s.readBlob(rw, r, blobKeyProto)
 	case http.MethodPut:
-		s.writeBlob(rw, r, blockKeyProto)
+		s.writeBlob(rw, r, blobKeyProto)
 	}
 }
 
@@ -433,16 +476,16 @@ func (s *Server) readBlob(rw http.ResponseWriter, r *http.Request, in *goproto.B
 	rw.Header().Set("Content-Length", strconv.FormatInt(int64(blobInfo.BlobSize), 10))
 	rw.Header().Set("Content-Type", "application/octet-stream")
 
-	path := filepath.Join(s.blockDir, getBlobPath(in))
-	f, err := os.Open(path)
+	f, err := s.openBlobReader(in)
 	if err != nil {
 		rw.WriteHeader(http.StatusInternalServerError)
 		err = fmt.Errorf("open blob file error: %w", err)
 		return
 	}
+
 	defer f.Close()
-	buf := s._4KBytesPool.Get().(*[]byte)
-	defer s._4KBytesPool.Put(buf)
+	buf := s._2MBytesPool.Get().(*[]byte)
+	defer s._2MBytesPool.Put(buf)
 	n, err := io.CopyBuffer(rw, f, *buf)
 	if err != nil {
 		rw.WriteHeader(http.StatusInternalServerError)
@@ -533,7 +576,7 @@ func (s *Server) writeBlob(rw http.ResponseWriter, r *http.Request, in *goproto.
 
 	defer r.Body.Close()
 
-	blobPath := filepath.Join(s.blockDir, getBlobPath(in))
+	blobPath := filepath.Join(s.blobDir, getBlobPath(in))
 	blobDir := filepath.Dir(blobPath)
 	err = os.MkdirAll(blobDir, 0o755)
 	if err != nil {
@@ -547,10 +590,19 @@ func (s *Server) writeBlob(rw http.ResponseWriter, r *http.Request, in *goproto.
 		writeErr = fmt.Errorf("open file %s error: %s", blobPath, err)
 		return
 	}
+	var writer io.Writer
+	var signer *DataSigner
+	if s.blobChecksum {
+		signer = NewDataSigner(SignBlobSize, blobInfo.BlobSize)
+		writer = io.MultiWriter(df, signer)
+	} else {
+		writer = df
+	}
 
-	buf := s._4KBytesPool.Get().(*[]byte)
-	defer s._4KBytesPool.Put(buf)
-	written, err := io.CopyBuffer(df, r.Body, *buf)
+	buf := s._2MBytesPool.Get().(*[]byte)
+	defer s._2MBytesPool.Put(buf)
+
+	written, err := io.CopyBuffer(writer, r.Body, *buf)
 	if err != nil {
 		writeErr = fmt.Errorf("copy body to file error: %s", err)
 		return
@@ -575,5 +627,13 @@ func (s *Server) writeBlob(rw http.ResponseWriter, r *http.Request, in *goproto.
 	if err != nil {
 		writeErr = fmt.Errorf("close file error: %w", err)
 		return
+	}
+
+	if s.blobChecksum {
+		err = os.WriteFile(blobPath+signSuffix(), SignMarshall(signer.Sum()), 0o600)
+		if err != nil {
+			writeErr = fmt.Errorf("write file sign error: %w", err)
+			return
+		}
 	}
 }
