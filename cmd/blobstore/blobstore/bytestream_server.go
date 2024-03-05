@@ -44,25 +44,25 @@ func (s *Server) Read(request *bytestream.ReadRequest, server bytestream.ByteStr
 			return status.Errorf(codes.Internal, "seek file error: %s", err)
 		}
 	}
-	buf := s._4MBytesPool.Get().([]byte)
+	buf := s._4MBytesPool.Get().(*[]byte)
 	defer s._4MBytesPool.Put(buf)
 	var lr io.Reader = f
 	if request.ReadLimit != 0 {
 		lr = io.LimitReader(f, request.ReadLimit)
 	}
 	for {
-		n, err := lr.Read(buf)
+		n, err := lr.Read(*buf)
 		if err != nil {
 			if !errors.Is(err, io.EOF) {
 				return status.Errorf(codes.Internal, "read file error: %s", err)
 			}
-			err = server.Send(&bytestream.ReadResponse{Data: buf[:n]})
+			err = server.Send(&bytestream.ReadResponse{Data: (*buf)[:n]})
 			if err != nil {
 				return status.Errorf(codes.Internal, "send data error: %s", err)
 			}
 			return nil
 		}
-		err = server.Send(&bytestream.ReadResponse{Data: buf[:n]})
+		err = server.Send(&bytestream.ReadResponse{Data: (*buf)[:n]})
 		if err != nil {
 			return err
 		}
@@ -160,12 +160,12 @@ func (s *Server) Write(server bytestream.ByteStream_WriteServer) (err error) {
 	}
 
 	var finishWrite bool
-	buf := s._4KBytesPoolAlignedBlock.Get().([]byte)
+	buf := s._4KBytesPoolAlignedBlock.Get().(*[]byte)
 	defer s._4KBytesPoolAlignedBlock.Put(buf)
 
 	var committedSize int64
 	writeOnceFn := func(InputData []byte) error {
-		written, err := io.CopyBuffer(df, bytes.NewReader(InputData), buf)
+		written, err := io.CopyBuffer(df, bytes.NewReader(InputData), *buf)
 		if err != nil {
 			return fmt.Errorf("copy body to file error: %s", err)
 		}

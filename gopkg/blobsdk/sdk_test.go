@@ -22,7 +22,7 @@ func TestBlobSDK(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	finished := make(chan struct{})
 	go func() {
-		cmd.ExecuteContext(ctx)
+		_ = cmd.ExecuteContext(ctx)
 		finished <- struct{}{}
 	}()
 	time.Sleep(5 * time.Second)
@@ -47,6 +47,7 @@ func TestBlobSDK(t *testing.T) {
 	t.Log("write data")
 	data := bytes.Repeat([]byte("a"), 8192)
 	n, err := wc.Write(data)
+	assert.Nil(t, err)
 	t.Log("data  write finished")
 	assert.Equal(t, 8192, n)
 	assert.Nil(t, wc.Close())
@@ -73,7 +74,7 @@ func TestBlobSDKGRPC(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	finished := make(chan struct{})
 	go func() {
-		cmd.ExecuteContext(ctx)
+		_ = cmd.ExecuteContext(ctx)
 		finished <- struct{}{}
 	}()
 	time.Sleep(5 * time.Second)
@@ -115,10 +116,12 @@ func TestBlobSDKGRPC(t *testing.T) {
 		ReadOffset:   0,
 		ReadLimit:    0,
 	})
-	defer rc.CloseSend()
+	assert.Nil(t, err)
 	rr, err := rc.Recv()
 	assert.Nilf(t, err, "%s", err)
 	assert.Equal(t, len(rr.Data), len(data))
+	err = rc.CloseSend()
+	assert.Nil(t, err)
 	cancel()
 	<-finished
 }

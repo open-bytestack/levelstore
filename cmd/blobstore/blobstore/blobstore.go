@@ -77,10 +77,12 @@ func NewServer(baseDir string) *Server {
 		db:       db,
 		blockDir: filepath.Join(baseDir, "blocks"),
 		_4KBytesPoolAlignedBlock: sync.Pool{New: func() interface{} {
-			return directio.AlignedBlock(4096)
+			ptr := directio.AlignedBlock(4096)
+			return &ptr
 		}},
 		_4MBytesPool: sync.Pool{New: func() interface{} {
-			return make([]byte, 4*1024*1024)
+			ptr := make([]byte, 4*1024*1024)
+			return &ptr
 		}},
 	}
 
@@ -368,7 +370,7 @@ func (s *Server) ServeHTTP(rw http.ResponseWriter, r *http.Request) {
 	blockKeyProto, err := parseVolumeIDAndSeq(blockKey)
 	if err != nil {
 		rw.WriteHeader(http.StatusBadRequest)
-		rw.Write([]byte(err.Error()))
+		_, _ = rw.Write([]byte(err.Error()))
 		return
 	}
 	switch r.Method {
@@ -397,18 +399,18 @@ func (s *Server) readBlob(rw http.ResponseWriter, r *http.Request, in *goproto.B
 		if ok {
 			if code.Code() == codes.NotFound {
 				rw.WriteHeader(http.StatusNotFound)
-				rw.Write([]byte("blob not found: " + r.RequestURI))
+				_, _ = rw.Write([]byte("blob not found: " + r.RequestURI))
 				return
 			}
 		}
 
 		rw.WriteHeader(http.StatusInternalServerError)
-		rw.Write([]byte("read blob error: " + err.Error()))
+		_, _ = rw.Write([]byte("read blob error: " + err.Error()))
 		return
 	}
 	if blobInfo.State != goproto.BlobState_NORMAL {
 		rw.WriteHeader(http.StatusInternalServerError)
-		rw.Write([]byte("read unreadable blob in state: " + blobInfo.State.String()))
+		_, _ = rw.Write([]byte("read unreadable blob in state: " + blobInfo.State.String()))
 		return
 	}
 
@@ -423,9 +425,9 @@ func (s *Server) readBlob(rw http.ResponseWriter, r *http.Request, in *goproto.B
 		return
 	}
 	defer f.Close()
-	buf := s._4KBytesPoolAlignedBlock.Get().([]byte)
+	buf := s._4KBytesPoolAlignedBlock.Get().(*[]byte)
 	defer s._4KBytesPoolAlignedBlock.Put(buf)
-	n, err := io.CopyBuffer(rw, f, buf)
+	n, err := io.CopyBuffer(rw, f, *buf)
 	if err != nil {
 		rw.WriteHeader(http.StatusInternalServerError)
 		err = fmt.Errorf("copy blob file error: %w", err)
@@ -446,26 +448,26 @@ func (s *Server) writeBlob(rw http.ResponseWriter, r *http.Request, in *goproto.
 		if ok {
 			if code.Code() == codes.NotFound {
 				rw.WriteHeader(http.StatusNotFound)
-				rw.Write([]byte("write not found: " + r.RequestURI))
+				_, _ = rw.Write([]byte("write not found: " + r.RequestURI))
 				return
 			}
 		}
 
 		rw.WriteHeader(http.StatusInternalServerError)
-		rw.Write([]byte("write blob error: " + err.Error()))
+		_, _ = rw.Write([]byte("write blob error: " + err.Error()))
 		return
 	}
 
 	if blobInfo.State != goproto.BlobState_INIT {
 		rw.WriteHeader(http.StatusInternalServerError)
-		rw.Write([]byte("write unwritable blob in state: " + blobInfo.State.String()))
+		_, _ = rw.Write([]byte("write unwritable blob in state: " + blobInfo.State.String()))
 		return
 	}
 
 	err = s.atomicUpdateBlobState(in, goproto.BlobState_PENDING)
 	if err != nil {
 		rw.WriteHeader(http.StatusInternalServerError)
-		rw.Write([]byte("write blob atomicUpdateBlobState error: " + err.Error()))
+		_, _ = rw.Write([]byte("write blob atomicUpdateBlobState error: " + err.Error()))
 		return
 	}
 
@@ -491,7 +493,7 @@ func (s *Server) writeBlob(rw http.ResponseWriter, r *http.Request, in *goproto.
 				).Error("update blob info error")
 			}
 			rw.WriteHeader(http.StatusInternalServerError)
-			rw.Write([]byte(writeErr.Error()))
+			_, _ = rw.Write([]byte(writeErr.Error()))
 			return
 		} else {
 			blobInfo.State = goproto.BlobState_NORMAL
@@ -507,7 +509,7 @@ func (s *Server) writeBlob(rw http.ResponseWriter, r *http.Request, in *goproto.
 					zap.String("blob_info", blobInfo.String()),
 				).Error("update blob info error")
 				rw.WriteHeader(http.StatusInternalServerError)
-				rw.Write([]byte(err.Error()))
+				_, _ = rw.Write([]byte(err.Error()))
 				return
 			}
 		}
@@ -530,9 +532,9 @@ func (s *Server) writeBlob(rw http.ResponseWriter, r *http.Request, in *goproto.
 		return
 	}
 
-	buf := s._4KBytesPoolAlignedBlock.Get().([]byte)
+	buf := s._4KBytesPoolAlignedBlock.Get().(*[]byte)
 	defer s._4KBytesPoolAlignedBlock.Put(buf)
-	written, err := io.CopyBuffer(df, r.Body, buf)
+	written, err := io.CopyBuffer(df, r.Body, *buf)
 	if err != nil {
 		writeErr = fmt.Errorf("copy body to file error: %s", err)
 		return

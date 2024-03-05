@@ -87,6 +87,8 @@ func (gc *gcController) runGCLoop() {
 	}
 }
 
+// stopGCLoop command for stop gc loop
+// //nolint: unused
 func (gc *gcController) stopGCLoop() {
 	gc.cancel()
 }

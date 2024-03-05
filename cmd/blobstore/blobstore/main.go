@@ -2,6 +2,7 @@ package blobstore
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"os"
 	"os/signal"
@@ -46,7 +47,9 @@ func MainCommand() *cobra.Command {
 			panic(err)
 		}
 		zap.ReplaceGlobals(lgr)
-		defer lgr.Sync()
+		defer func() {
+			fmt.Printf("zap log sync erorr: %s", lgr.Sync())
+		}()
 
 		if *flagBaseDir == "" {
 			zap.L().Fatal("basedir can not be empty")
